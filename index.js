@@ -9,6 +9,7 @@ const crypto = require('crypto')
 var admin = require("firebase-admin");
 
 var serviceAccount = require('./zap-shift-firebase-adminsdk.json');
+const { access } = require('fs');
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
@@ -32,13 +33,26 @@ function generateTrackingId() {
 // middle ware
 app.use(express.json());
 app.use(cors());
-const verifyToken = (req, res, next) =>{
- const token = req.headers. authorization;
+// verifyToken
+const verifyToken = async(req, res, next) =>{
+
+ const token = req.headers?.authorization;
+  //  console.log('after verify', token)
   if(!token){
     return res.status(401).send({message: 'unauthorize access'})
   }
+  try{
+    const idToken = token.split(' ')[1];
+    const decoded = await admin.auth().verifyIdToken(idToken)
+    req.decoded_email = decoded.email
+    console.log('after decoded : ', decoded);
 
- next()
+     next()
+  }
+catch (err){
+ return res.status(401).send({message: 'unauthorized access'})
+}
+
 }
 
 
@@ -58,9 +72,9 @@ async function run() {
     await client.connect();
     const db = client.db('zap-shift-db');
     const parcelCollection = db.collection('parcels');
-    const paymentCollection = db.collection('payment')
-
-
+    const paymentCollection = db.collection('payment');
+    const userCollection = db.collection('users');
+    const raiderCollection = db.collection('raiders');
     // get one and all data match email
     app.get('/parcels', async(req,res)=>{
       const query = {}
@@ -213,15 +227,83 @@ app.get('/payments', verifyToken, async(req,res)=>{
   const query = {}
   console.log('headers', req.headers);
   if(email){
-    query.customerEmail = email
+    query.customerEmail = email;
+      // check valid email address
+  if(email !== req.decoded_email){
+    return res.status(403).send({message : 'forbidden access'})
   }
-  const curser = paymentCollection.find(query);
+  }
+
+  const curser = paymentCollection.find(query).sort({paidAt: -1});
   const result = await curser.toArray();
   res.send(result)
-
+})
+// post for sending user in database
+app.post('/users', async(req,res)=>{
+  const user = req.body
+  const email = user.email
+  user.role = 'user'
+  user.CreateAt = new Date()
+  const userExist = await userCollection.findOne({email})
+  if(userExist){
+    return res.send({message : 'user already exist'})
+  }
+  const result = await userCollection.insertOne(user)
+  res.send(result);
 
 })
+// raider collection data send in database
+app.post('/raiders', async(req,res)=>{
+  const raider = req.body;
+  raider.status = 'painding';
+  raider.CreateAt = new Date();
+  const result = await raiderCollection.insertOne(raider)
+  res.send(result);
+})
+// get raider data in api 
+app.get('/raiders', async(req,res)=>{
+  const query = {}
+  if(req.query.status){
+    query.status = req.query.status
+  }
+  const cursor = raiderCollection.find(query)
+  const result = await cursor.toArray()
+  res.send(result)
+})
+//update status in a raider
+app.patch('/raiders/:id', verifyToken, async(req,res)=>{
+  const status = req.body.status
+  const id = req.params.id;
+  const query = { _id : new ObjectId(id)}
+  const updateDoc = {
+    $set:{
+      status:status
+    }
     
+  }
+  const result = await raiderCollection.updateOne(query , updateDoc);
+  //update user role , user to raider
+  if(status === 'approved'){
+    const email = req.body.email
+    const userQuery = {email}
+    const updateUser = {
+      $set:{
+        role: 'Raider'
+      }
+    }
+    const result = await userCollection.updateOne(userQuery, updateUser)
+    res.send(result)
+  }
+  res.send(result);
+})
+    // Delete a raider in database
+    app.delete('/raiders/:id', async(req,res) =>{
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id)}
+      const result = await raiderCollection.deleteOne(query)
+      res.send(result)
+    })
+
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
     console.log("You are connected with MongoDB!");
@@ -231,11 +313,6 @@ app.get('/payments', verifyToken, async(req,res)=>{
   }
 }
 run().catch(console.dir);
-
-
-
-
-
 
 app.get('/', (req, res) => {
   res.send('Zap shifting website is running!')
